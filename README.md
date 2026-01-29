@@ -1,1 +1,2 @@
-# Modelling_Evaluation_Leukaemia_Trials
+# Dynamic modelling and evaluation of preclinical trials in acute leukaemia
+This repository provides the R code for the statistical analyses reported in the paper "Dynamic modelling and evaluation of preclinical trials in acute leukaemia", including both the simulation study and the knockout experiments. Inference results and simulation data are included as RDS files. Shared utility functions are implemented in utils.R.
