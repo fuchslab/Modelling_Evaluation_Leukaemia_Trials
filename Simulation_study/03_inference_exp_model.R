@@ -66,7 +66,6 @@ estimation_exp_model <- function(data, pars_sim){
   data_dMod <- NULL
   p_dMod <- NULL
   
-  # create datalist separate for each mouse
   for (j in 1:length(unique_mice)){
     data_m <- data[data$mouse == unique_mice[j], ]
     data_m <- data_m[, c("name", "time", "value")]
@@ -76,7 +75,6 @@ estimation_exp_model <- function(data, pars_sim){
     names(data_m) <- unique_mice[j]
     data_dMod <- data_dMod + data_m
     
-    # add initial parameters for each mouse individually to the parameter transformations
     trafo <- getEquations(p_global, conditions = "global")
     trafo["x2"] <- paste0("exp(x1)/exp(theta2_", unique_mice[j], ")")
     p_dMod <- p_dMod + P(trafo, condition = unique_mice[j])
