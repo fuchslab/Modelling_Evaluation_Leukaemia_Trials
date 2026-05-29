@@ -183,3 +183,4 @@ for (n in 1:length(filenames_vector)) {
 # filename <- "results_exp_model"
 # file.path <- paste0(folder.path, "/RDS/", filename, ".rds")
 # saveRDS(results_list, file = file.path)
+# Due to storage reasons, profile likelihoods are removed from the rds file.
