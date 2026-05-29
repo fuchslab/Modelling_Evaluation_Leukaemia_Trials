@@ -22,74 +22,96 @@ library("parallel")
 ##### Generate exponential growth model for dMod #####
 # ODE model
 ode_equation <- eqnvec(x1 = "beta1*x1", x2 = "beta2*x2")
-model_dMod <- odemodel(ode_equation, modelname = "exponential_model")
-x_dMod <- Xs(model_dMod)
+model <- odemodel(ode_equation, modelname = "exponential_model") 
+x_dMod <- Xs(model)
 
 # Observable model
-observable <- eqnvec(y = "log(x1/(x1+x2))-(sigma^2)/2")
+observable <- eqnvec(y = "x1/(x1+x2)")
 g_dMod <- Y(observable, x_dMod, compile = T, attach.input = F)
 
 # Error model
 error_pars <- eqnvec(y = "sigma")
-error_dMod <- Y(
-  error_pars, f = c(observable, ode_equation), attach.input = TRUE, compile = TRUE)
+error_dMod <- Y(error_pars, f = c(observable, ode_equation), attach.input = T, compile = T)
 
 # Parameter transformations for original full model 
-p_full <- P(trafo=eqnvec(
-  x1 = "exp(x1)", x2 = "exp(x2)", beta1 = "beta1", beta2 = "beta2", 
-  sigma = "exp(sigma)"), condition = "C1")
-outerpars_full <- getParameters(p_full)
+# Global parameters
+p_full <- P(
+  eqnvec(
+    beta1 = "beta1", beta2 = "beta2", x1 = "exp(x1)", x2 = "exp(x2)", 
+    sigma = "exp(sigma)"), condition = "full") 
 
 # Reparametrisations to make model structurally identifiable
 equations <- getEquations(p_full)
-equations[["C1"]]["beta2"] <- "theta1+beta1"
-equations[["C1"]]["x2"] <- "exp(theta2)*exp(x1)"
-p_repar <- P(equations[["C1"]], condition = "C1")
-outerpars <- getParameters(p_repar)
-theta <- c("theta1", "theta2", "sigma")
+equations[["full"]]["beta2"] <- "theta1+beta1"
+equations[["full"]]["x2"] <- "exp(theta2)*exp(x1)"
+p_global <- P(equations[["full"]], condition = "global")
 
 
 ##### Simulated data ##### 
 # Specify data sets by file names
 filenames_vector <- c(
-  "simulated_data_size=8_seed=8.rds",
-  "simulated_data_size=16_seed=16.rds",
-  "simulated_data_size=32_seed=32.rds",
-  "simulated_data_size=64_seed=64.rds")
+  "simulated_data_size=8.rds",
+  "simulated_data_size=16.rds",
+  "simulated_data_size=32.rds")
 
 
 ################################################################################
 ########### Function to infer parameters of exponential growth model ###########
 ################################################################################
 # Function which is parallelised by foreach
-estimation_exp_model <- function(data, pouter){
+estimation_exp_model <- function(data, pars_sim){
   
-  # Extract time and value column of data set 
-  data <- data[, c("time", "value")]
+  # Prepare mouse-specific data sets and parameter transformations for dMod 
+  unique_mice <- unique(data$mouse)
+  data_dMod <- NULL
+  p_dMod <- NULL
   
-  # Prepare data for dMod and log-transform observations
-  data <- data[order(data$time),]
-  data$value <- log(data$value)
-  data$name <- "y"
-  data$sigma <- NA
-  data <- data[, c(3, 1, 2, 4)]
-  data <- datalist(C1 = data)
+  # create datalist separate for each mouse
+  for (j in 1:length(unique_mice)){
+    data_m <- data[data$mouse == unique_mice[j], ]
+    data_m <- data_m[, c("name", "time", "value")]
+    data_m <- data_m[order(data_m$time), ]
+    data_m$sigma <- NA
+    data_m <- datalist(data_m)
+    names(data_m) <- unique_mice[j]
+    data_dMod <- data_dMod + data_m
+    
+    # add initial parameters for each mouse individually to the parameter transformations
+    trafo <- getEquations(p_global, conditions = "global")
+    trafo["x2"] <- paste0("exp(x1)/exp(theta2_", unique_mice[j], ")")
+    p_dMod <- p_dMod + P(trafo, condition = unique_mice[j])
+  }
   
-  # Objective function for parameter estimation
-  obj <- normL2(data, g_dMod*x_dMod*p_repar, errmodel = error_dMod) + constraintL2(pouter, sigma = 5)
+  # Center of starting values for parameter estimation
+  outerpars <- getParameters(p_dMod)
+  outerpars_theta2 <- outerpars[grepl("theta2_", outerpars)]
+  pouter <- structure(c(
+    pars_sim[1, "b2"] - pars_sim[1, "d2"] - (pars_sim[1, "b1"] - pars_sim[1, "d1"]),
+    pars_sim[1, "b1"] - pars_sim[1, "d1"], 
+    log(pars_sim[1, "x1"]),
+    log(pars_sim[1, "sigma"]),
+    rep(log(1), length(outerpars_theta2))), 
+    names = c("theta1", "beta1", "x1", "sigma", outerpars_theta2))
+  
+  # Objective function for parameter estimation with L2-constraint
+  obj <- normL2(data_dMod, g_dMod*x_dMod*p_dMod, errmodel = error_dMod) + constraintL2(
+    pouter, sigma = 3)
+  
   # Multiple parameter estimation with randomly chosen starting values
-  fits <- mstrust(obj, pouter, studyname = "multiple_fits", rinit = 0.1, rmax = 10, 
-                  fits = 30, samplefun = "runif", iterlim = 500)
+  fits <- mstrust(obj, pouter, studyname = "multiple_fits", rinit = 0.1, 
+                  rmax = 10, fits = 30, samplefun = "runif", iterlim = 500)
   
   # Extract estimated parameters of best estimation run
   bestfit <- as.parvec(as.parframe(fits))
   
   # Objective value for best estimation run without L2-contribution
-  obj_value <- normL2(data, g_dMod*x_dMod*p_repar, errmodel = error_dMod)(bestfit)$value
+  obj_value <- normL2(data_dMod, g_dMod*x_dMod*p_dMod, errmodel = error_dMod)(
+    bestfit)$value
   
   # Profile likelihoods
-  profiles <- profile(obj = obj, pars = bestfit, whichPar = theta, alpha = 0.0001,
-                      method = "integrate")
+  profiles <- profile(
+    obj = obj, pars = bestfit, whichPar = c("theta1", outerpars_theta2, "sigma"),
+    alpha = 0.001, method = "integrate")
   
   # Profile likelihood-based confidence intervals (for 0.95 quantile of 
   # chi-squared distribution and for adapted threshold based on Cantelli's 
@@ -102,11 +124,12 @@ estimation_exp_model <- function(data, pouter){
   ci_0.99255_list <- ci_extraction(ci_0.99255_confint, profiles, obj_value, 0.99255)
   ci_0.95_list <- ci_extraction(ci_0.95_confint, profiles, obj_value, 0.95)
   
-  # Create output list with parameter estimates and confidence intervals
-  output_list <- list(
-    bestfit = bestfit, ci_0.95_list = ci_0.95_list, ci_0.99255_list = ci_0.99255_list)
+  # Prepare output
+  result_list <- list(
+    mllik = obj_value, bestfit = bestfit, profiles = profiles, 
+    ci_0.95_list = ci_0.95_list, ci_0.99255_list = ci_0.99255_list)
   
-  return(output_list)
+  return(result_list)
 }
 
 
@@ -115,7 +138,7 @@ estimation_exp_model <- function(data, pouter){
 ################################################################################
 set.seed(110)
 
-# list for results
+# List for results
 results_list <- list()
 
 # Loop through sample sizes
@@ -124,7 +147,6 @@ for (n in 1:length(filenames_vector)) {
   read_list <- readRDS(paste0(folder.path, "/RDS/", filenames_vector[n]))
   data_list <- read_list$data_list
   experiment_pars <- read_list$experiment_pars
-  
   result_list <- list()
   
   # Loop through modification scenarios
@@ -132,14 +154,7 @@ for (n in 1:length(filenames_vector)) {
     # Extract data sets for scenario
     data_list_exp <- data_list[[s]]
     num_sim <- length(data_list_exp)
-    
-    # Center of starting values for parameter estimation
-    pouter <- structure(
-      c(log(experiment_pars[s, "x1"]),
-        log(experiment_pars[s, "x2"]/experiment_pars[s, "x1"]),
-        experiment_pars[s, "b1"] - experiment_pars[s, "d1"],
-        experiment_pars[s, "b2"] - experiment_pars[s, "d2"] - (experiment_pars[s, "b1"]-experiment_pars[s, "d1"]),
-        log(experiment_pars[s, "sigma"])), names = outerpars)
+    pars_sim <- experiment_pars[s, 2:ncol(experiment_pars)]
     
     # Detect the number of available cores and activate cluster
     cl <- makeCluster(detectCores() - 1)
@@ -147,25 +162,24 @@ for (n in 1:length(filenames_vector)) {
     
     # Parallelise esimations for the simulated data sets
     result <- foreach(
-      i = 1:num_sim,
+      i = 1:num_sim, 
       .packages = c("dMod")) %dopar% {
         estimation_exp_model(
           data = data_list_exp[[i]], 
-          pouter = pouter)
+          pars_sim = pars_sim)
       }
     # Stop cluster
     stopCluster(cl)
     
     result_list <- c(result_list, list(result))
-    names(result_list)[length(result_list)] <- paste0("experiment_", s)
+    names(result_list)[length(result_list)] <- paste0("experiment_",s)
   }
   
   results_list <- c(results_list, list(result_list))
-  names(results_list)[length(results_list)] <- paste0(
-    "sample_size=", nrow(data_list[[1]][[1]]))
+  names(results_list)[length(results_list)] <- paste0("sample_size=", nrow(data_list_exp[[1]]))
 }
 
 # Save results
-# filename <- "results_exp_model_L2=5_seed=110"
+# filename <- "results_exp_model"
 # file.path <- paste0(folder.path, "/RDS/", filename, ".rds")
 # saveRDS(results_list, file = file.path)
