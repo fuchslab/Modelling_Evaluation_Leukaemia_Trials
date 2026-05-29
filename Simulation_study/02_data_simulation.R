@@ -92,7 +92,7 @@ for (s in 1:nrow(experiment_pars)) {
 
 # Save simulation
 # save_list <- list(data_list = data_list, design = design, experiment_pars = experiment_pars)
-# saveRDS(save_list, file = paste0(folder.path, "/RDS/simulated_data_size=8_seed=8.rds"))
+# saveRDS(save_list, file = paste0(folder.path, "/RDS/simulated_data_size=8.rds"))
 
 
 ##### Simulation for sample size = 16 #####
@@ -132,7 +132,7 @@ for (s in 1:nrow(experiment_pars)) {
 
 # Save simulation
 # save_list <- list(data_list = data_list, design = design, experiment_pars = experiment_pars)
-# saveRDS(save_list, file = paste0(folder.path, "/RDS/simulated_data_size=16_seed=16.rds"))
+# saveRDS(save_list, file = paste0(folder.path, "/RDS/simulated_data_size=16.rds"))
 
 
 ##### Simulation for sample size = 32 #####
@@ -172,4 +172,4 @@ for (s in 1:nrow(experiment_pars)) {
 
 # Save simulation
 # save_list <- list(data_list = data_list, design = design, experiment_pars = experiment_pars)
-# saveRDS(save_list, file = paste0(folder.path, "/RDS/simulated_data_size=32_seed=32.rds"))
+# saveRDS(save_list, file = paste0(folder.path, "/RDS/simulated_data_size=32.rds"))
