@@ -20,45 +20,37 @@ library("parallel")
 # source(functions.path)
 
 ##### Load data and information about experiments #####
-# Data of knockout experiments not provided
-# data_full contains seven columns:
-#   - "sample": name of leukaemia sample
-#   - "gene": gene number
-#   - "sgRNA": sgRNA number
-#   - "mouse": mouse name or in vitro number (only mice experiments considered)
-#   - "organ": organ from which measurement is taken; only bone marrow (BM) 
-#              measurements are considered (NA for in vitro experiment)
-#   - "time": measurement day
-#   - "value": measurement value
+# KO data
+# data_full <- readRDS(paste0(folder.path, "/RDS/", "KO_data.rds"))
 
-# Information about experiments, e.g. absolute input numbers, which are depicted
-# in Table 3
-# info_input <- readRDS(paste0(folder.path,"/RDS/","overview_experiments.rds"))
-# info_input$K <- info_input$K*1e6
-# info_input$x1 <- info_input$x1*1000
+# Information about experiments, e.g. absolute input numbers and maximum number 
+# of cells ever measured in laboratory for specific leukaemia samples
+# info_table <- readRDS(paste0(folder.path, "/RDS/", "overview_experiments.rds"))
+
+# Only consider experiments with n>=8 
+# info_table <- info_table[info_table$`Sample size` >= 8, c("Sample", "Gene", "K", "x1")]
 
 
 ##### Generate logistic growth model for dMod #####
 # ODE model
-ode_equation <- eqnvec(x1 = "lambda1*x1*(1-(x1+x2)/K)",
-                       x2 = "lambda2*x2*(1-(x1+x2)/K)")
-model_dMod <- odemodel(ode_equation, modelname = "logistic_model") 
-x_dMod <- Xs(model_dMod) 
+ode_equation <- eqnvec(
+  x1 = "lambda1*x1*(1-(x1+x2)/K)", x2 = "lambda2*x2*(1-(x1+x2)/K)")
+model <- odemodel(ode_equation, modelname = "logistic_model") 
+x_dMod <- Xs(model) 
 
 # Observable
-observable <- eqnvec(y = "log(x1/(x1+x2))-(sigma^2)/2")
+observable <- eqnvec(y = "x1/(x1+x2)")
 g_dMod <- Y(observable, x_dMod, compile = T, attach.input = F)
 
 # Error model
 error_pars <- eqnvec(y = "sigma")
-error_dMod <- Y(
-  error_pars, f = c(observable, ode_equation), attach.input = TRUE, compile = TRUE)
+error_dMod <- Y(error_pars, f = c(observable, ode_equation), attach.input = T, compile = T)
 
 # Parameter transformations
-p_dMod <- P(trafo = eqnvec(
-  lambda1 = "lambda1", lambda2 = "lambda2", K = "exp(K)", x1 = "exp(x1)", 
-  x2 = "exp(x2)", sigma = "exp(sigma)"), condition = "C1")
-outerpars <- getParameters(p_dMod)
+p_global <- P(
+  eqnvec(
+    lambda1 = "lambda1", lambda2 = "exp(lambda2)", K = "exp(K)", x1 = "exp(x1)", 
+    x2 = "exp(x2)", sigma = "exp(sigma)"), condition = "global")
 
 
 ################################################################################
@@ -68,57 +60,80 @@ outerpars <- getParameters(p_dMod)
 ###### Function which is parallelised by foreach #####
 estimation_log_model <- function(experiment_info){
   
-  # Extract data set, prepare it for dMod and log-transform observations
+  # Prepare mouse-specific data sets and parameter transformations for dMod
   data <- subset(data_full, sample == experiment_info$Sample & 
                    gene == experiment_info$Gene & organ == "BM")
-  data <- data[, c("time", "value")]
-  data <- data[order(data$time),]
-  data$value <- log(data$value)
   data$name <- "y"
-  data$sigma <- NA
-  data <- data[, c(3, 1, 2, 4)]
-  data <- datalist(C1 = data)
+  unique_mice <- unique(data$mouse)
+  data_dMod <- NULL
+  p_dMod <- NULL
   
-  # Specify fixed parameters
-  fixed_par <- c("K", "x1")
+  for (j in 1:length(unique_mice)){
+    data_m <- data[data$mouse == unique_mice[j], ]
+    data_m <- data_m[, c("name", "time", "value")]
+    data_m <- data_m[order(data_m$time), ]
+    data_m$sigma <- NA
+    data_m <- datalist(data_m)
+    names(data_m) <- unique_mice[j]
+    data_dMod <- data_dMod + data_m
+    
+    trafo <- getEquations(p_global, conditions = "global")
+    trafo["x1"] <- paste0("exp(x1_", unique_mice[j], ")")
+    trafo["x2"] <- paste0("exp(x2_", unique_mice[j], ")")
+    p_dMod <- p_dMod + P(trafo, condition = unique_mice[j])
+  }
   
-  # Center of starting values for parameter estimation
+  # Center of starting values for parameter estimation and fixed parameters
+  outerpars <- getParameters(p_dMod)
+  outerpars_x1 <- outerpars[grepl("x1_", outerpars)]
+  outerpars_x2 <- outerpars[grepl("x2_", outerpars)]
+  fixed_par <- c("K", outerpars_x1)
   pouter <- structure(
-    c(0, 0.1, log(experiment_info$K), log(experiment_info$x1),
-      log(experiment_info$x1), log(0.5)), names = outerpars)
+    c(0.1, log(0.2), log(experiment_info$K), 
+      rep(log(experiment_info$x1), length(outerpars_x1)), 
+      rep(log(experiment_info$x1), length(outerpars_x2)), 
+      log(0.05)), 
+    names = c("lambda1", "lambda2", "K", outerpars_x1, outerpars_x2, "sigma"))
   
-  # Objective function for parameter estimation
-  obj <- normL2(data, g_dMod*x_dMod*p_dMod, errmodel = error_dMod) + constraintL2(
-    pouter, sigma = c(3, 3, 5, 5, 5, 3)) 
+  # Objective function for parameter estimation with L2-constraint
+  obj <- normL2(data_dMod, g_dMod*x_dMod*p_dMod, errmodel = error_dMod) + constraintL2(
+    pouter, sigma = 3)
   
   # Multiple parameter estimation with randomly chosen starting values
   fits <- mstrust(obj, pouter[!names(pouter) %in% fixed_par], fixed = pouter[fixed_par], 
                   studyname = "multiple_fits", rinit = 0.1, rmax = 10, fits = 30, 
-                  samplefun = "runif", iterlim = 500) 
+                  samplefun = "runif", iterlim = 500)
   
   # Extract estimated parameters of best estimation run
   bestfit <- as.parvec(as.parframe(fits))
   
-  # Objective function for parameter estimation
-  obj_value <- normL2(data, g_dMod*x_dMod*p_dMod, errmodel = error_dMod)(c(bestfit, pouter[fixed_par]))$value
+  # Objective value for best estimation run without L2-contribution
+  obj_value <- normL2(data_dMod, g_dMod*x_dMod*p_dMod, errmodel = error_dMod)(
+    c(bestfit, pouter[fixed_par]))$value
   
   # Profile likelihoods
-  profiles <- profile(obj = obj, pars = bestfit, fixed = pouter[fixed_par], 
-                      whichPar = c("lambda1", "lambda2", "x2", "sigma"), 
-                      alpha = 0.001, method = "integrate")
+  profiles <- profile(
+    obj = obj, pars = bestfit, fixed = pouter[fixed_par], 
+    whichPar = names(pouter)[!names(pouter) %in% c(fixed_par)], 
+    alpha = 0.001, method = "integrate")
   
-  # Profile likelihood-based confidence intervals
-  ci_confint <- confint(profiles, val.column = "data", level = 0.95)
+  # Profile likelihood-based confidence intervals (for 0.95 quantile of 
+  # chi-squared distribution and for adapted threshold based on Cantelli's 
+  # inequality)
+  ci_0.99255_confint <- confint(profiles, val.column = "data", level=0.99255)
+  ci_0.95_confint <- confint(profiles, val.column="data", level=0.95)
   
   # If a confidence interval crosses confidence threshold more than twice,
   # adapt confidence interval; otherwise, just transform CIs to list
-  ci_0.95_list <- ci_extraction(ci_confint, profiles, obj_value, 0.95)
+  ci_0.99255_list <- ci_extraction(ci_0.99255_confint, profiles, obj_value, 0.99255)
+  ci_0.95_list <- ci_extraction(ci_0.95_confint, profiles, obj_value, 0.95)
   
-  # Prepare output list
+  # Prepare output
   result_list <- list(
     sample = experiment_info$Sample, gene = experiment_info$Gene, 
-    fixed_par = c(K = exp(pouter["K"]), x1 = exp(pouter["x1"])), 
-    bestfit = bestfit, ci_0.95_list = ci_0.95_list)
+    mllik = obj_value, bestfit = bestfit, profiles = profiles, 
+    ci_0.95_list = ci_0.95_list, ci_0.99255_list = ci_0.99255_list)
+  
   return(result_list)
 }
 
@@ -132,23 +147,23 @@ registerDoParallel(cl)
 
 # Parallelise estimations for knockout data sets
 log_model_results <- foreach(
-  i = 1:nrow(info_input),
+  i = 1:nrow(info_table), 
   .packages = c("dMod")) %dopar% {
     estimation_log_model(
-      experiment_info = info_input[i,])
+      experiment_info = info_table[i,])
   }
 
 # Stop cluster
 stopCluster(cl)
 
 # Name result list elements by sample and gene
-for (j in 1:length(log_model_results)){
-  names(log_model_results)[j] <- paste0(
-    log_model_results[[j]]$sample, "_", log_model_results[[j]]$gene)
+for (i in 1:length(log_model_results)){
+  names(log_model_results)[i] <- paste(
+    log_model_results[[i]]$sample, log_model_results[[i]]$gene, sep = "_")
 }
 
 # Save results
-# filename <- "results_log_model_fixed=(K,x1)_L2=(3,3,5,5,5,3)_seed=200.rds"
+# filename <- "results_log_model.rds"
 # saveRDS(log_model_results, file = paste0(folder.path, "/RDS/", filename))
 
 
@@ -157,7 +172,7 @@ for (j in 1:length(log_model_results)){
 ################################################################################
 
 # Load estimation results
-# filename <- "results_log_model_fixed=(K,x1)_L2=(3,3,5,5,5,3)_seed=200.rds"
+# filename <- "results_log_model.rds"
 # result_list <- readRDS(paste0(folder.path, "/RDS/", filename))
 
 
@@ -171,43 +186,56 @@ num_data_sets <- 500
 
 
 ### Function which is parallelised to re-estimate parameters for bootstrap samples 
-bootstrap_log_model <- function(data_b, pouter, fixed_par){
+bootstrap_log_model <- function(data_sim, pouter, fixed_par, p_dMod){
   
-  # ´Prepare bootstrap sample for dMod
-  data_b <- as.data.frame(data_b)
-  data_b$name <- "y"
-  data_b$sigma <- NA
-  data_b <- data_b[, c(3, 1, 2, 4)]
-  data_b <- datalist(C1 = data_b)
+  # Generate bootstrap sample by adding noise to simulated data and prepare 
+  # mouse-specific data sets for dMod 
+  data_sim$value <- data_sim$value + rnorm(
+    nrow(data_sim), mean = 0, sd = as.numeric(exp(pouter["sigma"])))
+  unique_mice <- unique(data_sim$mouse)
+  data_dMod <- NULL
   
-  # Objective function for parameter estimation
-  obj <- normL2(data_b, g_dMod*x_dMod*p_dMod, errmodel = error_dMod) + constraintL2(
-    pouter, sigma = c(3, 3, 5, 5, 5, 3)) 
+  for (j in 1:length(unique_mice)){
+    data_m <- data_sim[data_sim$mouse == unique_mice[j], ]
+    data_m <- data_m[, c("name", "time", "value")]
+    data_m <- data_m[order(data_m$time), ]
+    data_m$sigma <- NA
+    data_m <- datalist(data_m)
+    names(data_m) <- unique_mice[j]
+    data_dMod <- data_dMod + data_m
+  }
+  
+  # Objective function for parameter estimation with L2-constraint
+  obj <- normL2(data_dMod, g_dMod*x_dMod*p_dMod, errmodel = error_dMod) + constraintL2(
+    pouter, sigma = 3)
   
   # Multiple parameter estimation with randomly chosen starting values
-  fits <- mstrust(obj, pouter[!names(pouter)%in%fixed_par], fixed = pouter[fixed_par],
-                  studyname = "multiple_fits", rinit = 0.1, rmax = 10, fits = 10, 
+  fits <- mstrust(obj, pouter[!names(pouter) %in% fixed_par], fixed = pouter[fixed_par], 
+                  studyname = "multiple_fits", rinit = 0.1, rmax = 10, fits = 30, 
                   samplefun = "runif", iterlim = 500)
   
   # If no estimation has converged yet, run multiple estimations until at least
   # one estimation converges
   while (inherits(try(as.parframe(fits)), "try-error")) {
-    fits <- mstrust(obj, pouter[!names(pouter)%in%fixed_par], fixed = pouter[fixed_par],
-                    studyname = "multiple_fits", rinit = 0.1, rmax = 10, fits = 10, iterlim = 1000)
+    fits <- mstrust(
+      obj, pouter[!names(pouter) %in% fixed_par], fixed = pouter[fixed_par], 
+      studyname = "multiple_fits", rinit = 0.1, rmax = 10, fits = 10, 
+      samplefun = "runif", iterlim = 1000)
   }
   
   # Extract estimated parameters of best estimation run
   bestfit_b <- as.parvec(as.parframe(fits))
   
-  # Prepare results
-  result_b <- data.frame(
-    mllik_star = as.numeric(normL2(data_b, g_dMod*x_dMod*p_dMod, errmodel = error_dMod)(pouter)$value),
-    mllik = as.numeric(normL2(data_b, g_dMod*x_dMod*p_dMod, errmodel = error_dMod)(c(bestfit_b, pouter[fixed_par]))$value),
-    lambda1 = as.numeric(bestfit_b["lambda1"]),
-    lambda2 = as.numeric(bestfit_b["lambda2"]),
-    x2 = as.numeric(exp(bestfit_b["x2"])),
-    sigma = as.numeric(exp(bestfit_b["sigma"])))
-  rownames(result_b) <- NULL
+  # Calculate objective values for bootstrap estimates and original estimates
+  mllik <- as.numeric(
+    normL2(data_dMod, g_dMod*x_dMod*p_dMod, errmodel = error_dMod)(
+      c(bestfit_b, pouter[fixed_par]))$value)
+  mllik_star <- as.numeric(
+    normL2(data_dMod, g_dMod*x_dMod*p_dMod, errmodel = error_dMod)(
+      pouter)$value)
+  
+  # Prepare output
+  result_b <- list(mllik = mllik, mllik_star = mllik_star, data_dMod = data_dMod)
   
   return(result_b)
 }
@@ -219,32 +247,45 @@ boot_results <- list()
 
 # Loop through knockout experiments
 for (s in 1:length(result_list)) {
-  
-  # Load experiment information
+  # Load information about knockout data set
   sample_name <- result_list[[s]]$sample
-  gene_nr <- result_list[[s]]$gene
+  gene_name <- result_list[[s]]$gene
+  exp_name <- paste0(sample_name, "_", gene_name)
+  experiment_info <- subset(info_table, Sample == sample_name & Gene == gene_name)
   
-  # Specify fixed parameters and set starting values to estimates for original data set
-  fixed_par <- c("K", "x1")
-  pouter <- structure(
-    c(as.numeric(result_list[[s]]$bestfit), as.numeric(log(result_list[[s]]$fixed_par))),
-    names = c(names(result_list[[s]]$bestfit), fixed_par))
+  # Extract data set and prepare mouse-specific parameter transformations for dMod
+  data <- subset(data_full, sample == sample_name & gene == gene_name)
+  unique_mice <- unique(data$mouse)
+  p_dMod <- NULL
   
-  # Create bootstrap samples
-  time_obs <- sort(subset(
-    data_full, sample == sample_name & gene == gene_nr & organ == "BM")$time)
-  num_obs <- length(time_obs)
-  data_sim <- data.frame(time = time_obs)
-  prediction <- (g_dMod*x_dMod*p_dMod)(time_obs, pouter)
-  data_sim <- merge(data_sim, prediction$C1, by = "time", all.x = TRUE)
-  data_array <- array(NA, dim = c(num_obs, 2, num_data_sets), 
-                      dimnames = list(NULL, c("time", "value"), NULL))
-  data_array[,1,] <- data_sim[,1]
-  data_array[,2,] <- data_sim[,2]
-  data_array[,2,] <- apply(data_array[,2,], 2, function(obs) {
-    random_vector <- rnorm(num_obs, 0, exp(pouter["sigma"]))
-    obs + random_vector
-  })
+  for (j in 1:length(unique_mice)){
+    trafo <- getEquations(p_global, conditions = "global")
+    trafo["x1"] <- paste0("exp(x1_", unique_mice[j], ")")
+    trafo["x2"] <- paste0("exp(x2_", unique_mice[j], ")")
+    p_dMod <- p_dMod + P(trafo, condition = unique_mice[j])
+  }
+  
+  # Prepare bootstrap samples via predicting observable values for time points
+  # of original data set and estimated parameters
+  time_obs <- sort(data$time)
+  outerpars <- getParameters(p_dMod)
+  outerpars_x1 <- outerpars[grepl("x1_", outerpars)]
+  fixed_par_sim <- structure(
+    c(log(experiment_info$K), rep(log(experiment_info$x1), length(outerpars_x1))), 
+    names = c("K", outerpars_x1))
+  pouter <- c(result_list[[s]]$bestfit, fixed_par_sim)
+  prediction_list <- (g_dMod*x_dMod*p_dMod)(time_obs, pouter)
+  data_prediction <- data.frame(matrix(NA, nrow = 0, ncol = 3))
+  for (j in 1:length(prediction_list)){
+    df <- as.data.frame(prediction_list[[j]])
+    df$mouse <- names(prediction_list)[j]
+    data_prediction <- rbind(data_prediction, df)
+  }
+  data_sim <- left_join(data, data_prediction, by = c("time", "mouse"))
+  data_sim$name <- "y"
+  data_sim <- data_sim[, c("mouse", "name", "time", "y")]
+  colnames(data_sim)[4] <- "value"
+  data_sim <- data_sim[order(data_sim$time, data_sim$mouse), ]
   
   # Detect the number of available cores and activate cluster
   cl <- makeCluster(detectCores() - 1)
@@ -252,25 +293,25 @@ for (s in 1:length(result_list)) {
   
   # Parallelise parameter estimation for all bootstrap samples
   results <- foreach(
-    i = 1:num_data_sets, 
-    .packages = c("dMod")) %dopar% {
+    i = 1:num_data_sets,
+    .packages=c("dMod")) %dopar% {
       bootstrap_log_model(
-        data_b = data_array[,,i], 
-        pouter = pouter, 
-        fixed_par = fixed_par)
+        data_sim = data_sim, 
+        pouter = pouter,
+        fixed_par = names(fixed_par_sim),
+        p_dMod = p_dMod)
     }
   
   # Stop cluster
   stopCluster(cl)
   
-  # Save bootstrap results for this knockout experiment
-  results_df <- do.call(rbind, results)
-  boot_results <- c(boot_results, list(list(results_df = results_df, data_array = data_array)))
-  names(boot_results)[length(boot_results)] <- paste0(sample_name, "_", gene_nr)
+  # Store bootstrap results for this knockout experiment
+  boot_results <- c(boot_results, list(results))
+  names(boot_results)[length(boot_results)] <- exp_name
 }
 
-# Save all bootstrap samples and all estimated models
-# filename <- "results_log_model_fixed=(K,x1)_L2=(3,3,5,5,5,3)_chi_boot_seed=525.rds"
+# Save bootstrap samples and all estimated models
+# filename <- "results_log_model_chi_boot.rds"
 # saveRDS(boot_results, file = paste0(folder.path, "/RDS/", filename))
 
 
@@ -280,127 +321,60 @@ for (s in 1:length(result_list)) {
 set.seed(8)
 
 # Load bootstrap results
-# filename <- "results_log_model_fixed=(K,x1)_L2=(3,3,5,5,5,3)_chi_boot_seed=525.rds"
+# filename <- "results_log_model_chi_boot.rds"
 # boot_results <- readRDS(paste0(folder.path, "/RDS/", filename))
 
 
 ### Function which is parallelised to estimate model parameters for bootstrap 
 ### samples if parameters are consecutively fixed to estimated values of 
 ### original data set
-ecdf_log_model <- function(data_b, pouter){
+ecdf_log_model <- function(boot_result, pouter, p_dMod){
   
-  # Prepare data for dMod
-  data_b <- as.data.frame(data_b)
-  data_b$name <- "y"
-  data_b$sigma <- NA
-  data_b <- data_b[, c(3, 1, 2, 4)]
-  data_b <- datalist(C1 = data_b)
+  # Extract bootstrap sample
+  data_dMod <- boot_result$data_dMod
   
-  # Objective function for parameter estimation
-  obj <- normL2(data_b, g_dMod*x_dMod*p_dMod, errmodel = error_dMod) + constraintL2(
-    pouter, sigma = c(3, 3, 5, 5, 5, 3)) 
+  # Objective function with L2-constraint
+  obj <- normL2(data_dMod, g_dMod*x_dMod*p_dMod, errmodel = error_dMod) + constraintL2(
+    pouter, sigma = 3)
   
+  # Parameter names for which empirical likelihood ratios should be calculated 
+  # and output data frame
+  par_names <- c("lambda1", "lambda2", "sigma", paste0("x2_", getConditions(p_dMod)))
+  mllik_simple_df <- data.frame(matrix(NA, nrow = 1, ncol = (length(par_names) + 1)))
+  colnames(mllik_simple_df) <- c("mllik_theta_all", par_names)
+  mllik_simple_df[1, "mllik_theta_all"] <- boot_result$mllik
   
-  ### lambda1 fixed to "true" value alongside K and x1
-  fixed <- pouter[c("lambda1", "K", "x1")]
-  
-  # Multiple parameter estimation with randomly chosen starting values and additionally lambda1 fixed
-  fits <- mstrust(obj, pouter[!names(pouter) %in% names(fixed)], fixed = fixed,
-                  studyname = "multiple_fits", rinit = 0.1, rmax = 10, fits = 10, 
-                  samplefun = "runif", iterlim = 500)
-  
-  # If no estimation has converged yet, run multiple estimations until at least
-  # one estimation converges
-  while (inherits(try(as.parframe(fits)), "try-error")) {
-    fits <- mstrust(obj, pouter[!names(pouter) %in% names(fixed)], fixed = fixed,
-                    studyname = "multiple_fits", rinit = 0.1, rmax = 10, fits = 10, iterlim = 1000)
+  # Loop through all parameters for which empirical likelihood ratios should be
+  # calculated and estimate nested models
+  for (j in 1:length(par_names)){
+    # Fix parameter to "true" value
+    fixed <- pouter[c("K", paste0("x1_", getConditions(p_dMod)), par_names[j])]
+    
+    # Estimate remaining parameters
+    fits <- mstrust(
+      obj, pouter[!names(pouter) %in% names(fixed)], fixed = fixed, rinit = 0.1, 
+      rmax = 10, studyname = "multiple_fits", fits = 10, samplefun = "runif", 
+      iterlim = 500)
+    
+    # If no estimation has converged yet, run multiple estimations until at least
+    # one estimation converges
+    while (inherits(try(as.parframe(fits)), "try-error")) {
+      fits <- mstrust(
+        obj, pouter[!names(pouter) %in% names(fixed)], fixed = fixed, rinit = 0.1, 
+        rmax = 10, studyname = "multiple_fits", fits = 10, samplefun = "runif", 
+        iterlim = 1000)
+    }
+    
+    # Extract estimated parameters of best estimation run
+    fit_pars <- as.parvec(as.parframe(fits))
+    
+    # Store results
+    mllik_simple <- normL2(
+      data_dMod, g_dMod*x_dMod*p_dMod, errmodel = error_dMod)(c(fit_pars, fixed))$value
+    mllik_simple_df[1, par_names[j]] <- mllik_simple
   }
   
-  # Extract estimated parameters of best estimation run
-  bestfit <- as.parvec(as.parframe(fits))
-  
-  # Objective value for best estimation run without L2-contribution
-  mllik_simple_lambda1 <- normL2(
-    data_b, g_dMod*x_dMod*p_dMod, errmodel = error_dMod)(c(bestfit, fixed))$value
-  
-  
-  ### lambda2 fixed to "true" value alongside K and x1
-  fixed <- pouter[c("lambda2", "K", "x1")]
-  
-  # Multiple parameter estimation with randomly chosen starting values and additionally lambda2 fixed
-  fits <- mstrust(obj, pouter[!names(pouter) %in% names(fixed)], fixed = fixed,
-                  studyname = "multiple_fits", rinit = 0.1, rmax = 10, fits = 10, 
-                  samplefun = "runif", iterlim = 500)
-  
-  # If no estimation has converged yet, run multiple estimations until at least
-  # one estimation converges
-  while (inherits(try(as.parframe(fits)), "try-error")) {
-    fits <- mstrust(obj, pouter[!names(pouter) %in% names(fixed)], fixed = fixed,
-                    studyname = "multiple_fits", rinit = 0.1, rmax = 10, fits = 10, iterlim = 1000)
-  }
-  
-  # Extract estimated parameters of best estimation run
-  bestfit <- as.parvec(as.parframe(fits))
-  
-  # Objective value for best estimation run without L2-contribution
-  mllik_simple_lambda2 <- normL2(
-    data_b, g_dMod*x_dMod*p_dMod, errmodel = error_dMod)(c(bestfit, fixed))$value
-  
-  
-  ### x2 fixed to "true" value alongside K and x1
-  fixed <- pouter[c("K", "x1", "x2")]
-  
-  # Multiple parameter estimation with randomly chosen starting values and additionally x2 fixed
-  fits <- mstrust(obj, pouter[!names(pouter) %in% names(fixed)], fixed = fixed,
-                  studyname = "multiple_fits", rinit = 0.1, rmax = 10, fits = 10, 
-                  samplefun = "runif", iterlim = 500)
-  
-  # If no estimation has converged yet, run multiple estimations until at least
-  # one estimation converges
-  while (inherits(try(as.parframe(fits)), "try-error")) {
-    fits <- mstrust(obj, pouter[!names(pouter) %in% names(fixed)], fixed = fixed,
-                    studyname = "multiple_fits", rinit = 0.1, rmax = 10, fits = 10, iterlim = 1000)
-  }
-  
-  # Extract estimated parameters of best estimation run
-  bestfit <- as.parvec(as.parframe(fits))
-  
-  # Objective value for best estimation run without L2-contribution
-  mllik_simple_x2 <- normL2(
-    data_b, g_dMod*x_dMod*p_dMod, errmodel = error_dMod)(c(bestfit, fixed))$value
-  
-  
-  ### sigma fixed to "true" value alongside K and x1
-  fixed <- pouter[c("K", "x1", "sigma")]
-  
-  # Multiple parameter estimation with randomly chosen starting values and additionally sigma fixed
-  fits <- mstrust(obj, pouter[!names(pouter) %in% names(fixed)], fixed = fixed,
-                  studyname = "multiple_fits", rinit = 0.1, rmax = 10, fits = 10, 
-                  samplefun = "runif", iterlim = 500)
-  
-  # If no estimation has converged yet, run multiple estimations until at least
-  # one estimation converges
-  while (inherits(try(as.parframe(fits)), "try-error")) {
-    fits <- mstrust(obj, pouter[!names(pouter) %in% names(fixed)], fixed = fixed,
-                    studyname = "multiple_fits", rinit = 0.1, rmax = 10, fits = 10, iterlim = 1000)
-  }
-  
-  # Extract estimated parameters of best estimation run
-  bestfit <- as.parvec(as.parframe(fits))
-  
-  # Objective value for best estimation run without L2-contribution
-  mllik_simple_sigma <- normL2(
-    data_b, g_dMod*x_dMod*p_dMod, errmodel = error_dMod)(c(bestfit, fixed))$value
-  
-  # Collect log-likelihoods 
-  mllik_simple_b <- data.frame(
-    mllik_lambda1 = mllik_simple_lambda1, 
-    mllik_lambda2 = mllik_simple_lambda2,
-    mllik_x2 = mllik_simple_x2,
-    mllik_sigma = mllik_simple_sigma
-  )
-  
-  return(mllik_simple_b=mllik_simple_b)
+  return(mllik_simple_df)
 }
 
 
@@ -411,16 +385,30 @@ ecdf_results <- list()
 # Loop through bootstrap results of the knockout experiments 
 for (s in 1:length(boot_results)){
   
-  # Extract bootstrap samples
+  # Extract information about experiment
   exp_name <- names(boot_results)[s]
-  data_array <- boot_results[[s]]$data_array
+  exp_sample_gene <- strsplit(exp_name, "_")[[1]]
+  sample_name <- exp_sample_gene[1]
+  gene_name <- as.numeric(exp_sample_gene[2])
+  experiment_info <- subset(info_table, Sample == sample_name & Gene == gene_name)
   
-  # Set starting values to estimated parameters of original data set
-  pouter <- structure(
-    c(as.numeric(result_list[[exp_name]]$bestfit), 
-      as.numeric(log(result_list[[exp_name]]$fixed_par))),
-    names = c(names(result_list[[exp_name]]$bestfit), 
-              names(result_list[[exp_name]]$fixed_par)))
+  # Prepare mouse-specific parameter transformations for dMod 
+  unique_mice <- names(boot_results[[s]][[1]]$data_dMod)
+  p_dMod <- NULL
+  for (j in 1:length(unique_mice)){
+    trafo <- getEquations(p_global, conditions = "global")
+    trafo["x1"] <- paste0("exp(x1_", unique_mice[j], ")")
+    trafo["x2"] <- paste0("exp(x2_", unique_mice[j], ")")
+    p_dMod <- p_dMod + P(trafo, condition = unique_mice[j])
+  }
+  
+  # Center of starting values for parameter estimation
+  outerpars <- getParameters(p_dMod)
+  outerpars_x1 <- outerpars[grepl("x1_", outerpars)]
+  fixed_par_sim <- structure(
+    c(log(experiment_info$K), rep(log(experiment_info$x1), length(outerpars_x1))), 
+    names = c("K", outerpars_x1))
+  pouter <- c(result_list[[exp_name]]$bestfit, fixed_par_sim)
   
   # Detect the number of available cores and activate cluster
   cl <- makeCluster(detectCores() - 1)
@@ -429,43 +417,37 @@ for (s in 1:length(boot_results)){
   # Parallelise estimations for the bootstrap samples of a knockout experiment
   mllik_simple_results <- foreach(
     i = 1:num_data_sets,
-    .packages = c("dMod")) %dopar% {
+    .packages=c("dMod")) %dopar% {
       ecdf_log_model(
-        data_b = data_array[,,i], 
-        pouter = pouter)
+        boot_result = boot_results[[s]][[i]], 
+        pouter = pouter,
+        p_dMod = p_dMod)
     }
   
   # Stop cluster
   stopCluster(cl)
   
-  # Combine obtained log-likelihoods of the samples for this knockout experiment
-  mllik_simple_df <- do.call(rbind, mllik_simple_results)
+  # Combine results for this knockout experiment
+  mllik_simple_results_df <- do.call(rbind, mllik_simple_results)
   
-  # Calculate ELRs
-  elr_lambda1 <- mllik_simple_df$mllik_lambda1 - boot_results[[s]]$results_df$mllik
-  elr_lambda2 <- mllik_simple_df$mllik_lambda2 - boot_results[[s]]$results_df$mllik
-  elr_x2 <- mllik_simple_df$mllik_x2 - boot_results[[s]]$results_df$mllik
-  elr_sigma <- mllik_simple_df$mllik_sigma - boot_results[[s]]$results_df$mllik
+  # ECDF
+  ecdf_df <- data.frame(matrix(
+    NA, nrow = nrow(mllik_simple_results_df), ncol = ncol(mllik_simple_results_df)))
+  colnames(ecdf_df) <- c("ecdf", colnames(mllik_simple_results_df)[-1])
   
-  elr_lambda1_sorted <- sort(elr_lambda1)
-  elr_lambda2_sorted <- sort(elr_lambda2)
-  elr_x2_sorted <- sort(elr_x2)
-  elr_sigma_sorted <- sort(elr_sigma)
-  
-  # Calculate ECDFs
-  ecdf_df <- data.frame(
-    ecdf = ecdf_func(elr_lambda1_sorted),
-    lambda1_theo = pchisq(elr_lambda1_sorted, 1),
-    lambda2_theo = pchisq(elr_lambda2_sorted, 1),
-    x2_theo = pchisq(elr_x2_sorted, 1),
-    sigma_theo = pchisq(elr_sigma_sorted, 1))
+  for (j in 2:ncol(mllik_simple_results_df)){
+    elr <- mllik_simple_results_df[, j] - mllik_simple_results_df[, "mllik_theta_all"]
+    elr <- sort(elr)
+    if (j == 2) ecdf_df[, 1] <- ecdf_func(elr)
+    ecdf_df[, j] <- pchisq(elr, 1)
+  }
   
   ecdf_results <- c(ecdf_results, list(ecdf_df))
   names(ecdf_results)[length(ecdf_results)] <- exp_name
 }
 
 # Save ECDFs
-# filename <- "results_log_model_fixed=(K,x1)_L2=(3,3,5,5,5,3)_ecdf_seed=8_genes.rds"
+# filename <- "results_log_model_ecdf.rds"
 # saveRDS(ecdf_results, file = paste0(folder.path, "/RDS/", filename))
 
 
@@ -497,10 +479,10 @@ diff_pred <- predict(poly_fit, data.frame(q = pred_x))
 
 ##### Classification of pp-plot graphs #####
 # Load bootstrap and ECDF results
-# filename <- "results_log_model_fixed=(K,x1)_L2=(3,3,5,5,5,3)_chi_boot_seed=525.rds"
+# filename <- "results_log_model_chi_boot.rds"
 # boot_results <- readRDS(paste0(folder.path, "/RDS/", filename))
-# num_data_sets <- dim(boot_results[[1]]$data_array)[3]
-# filename <- "results_log_model_fixed=(K,x1)_L2=(3,3,5,5,5,3)_ecdf_seed=8_genes.rds"
+# num_data_sets <- length(boot_results[[1]])
+# filename <- "results_log_model_ecdf.rds"
 # ecdf_results <- readRDS(paste0(folder.path, "/RDS/", filename))
 
 
@@ -515,19 +497,22 @@ p_idx <- 476 # index for which: which(pred_x==0.95)
 tol_p <- tol[p_idx]
 
 # Data frame for number of points below consensus region (i.e. in anti-conservative region)
-no_points_below_consensus_df <- data.frame(matrix(NA, nrow = length(ecdf_results), ncol = 5))
+no_points_below_consensus_df <- data.frame(matrix(
+  NA, nrow = length(ecdf_results), ncol = (4 + length(unique(data_full$mouse)))))
 colnames(no_points_below_consensus_df) <- c(
-  "experiment", "lambda1", "lambda2", "x2", "sigma")
+  "experiment", "lambda1", "lambda2", "sigma", paste0("x2_", unique(data_full$mouse)))
 
 # Data frame for pp-plot classification
-classification_pp_df <- data.frame(matrix(NA, nrow = length(ecdf_results), ncol = 5))
+classification_pp_df <- data.frame(matrix(
+  NA, nrow = length(ecdf_results), ncol = (4 + length(unique(data_full$mouse)))))
 colnames(classification_pp_df) <- c(
-  "experiment", "lambda1", "lambda2", "x2", "sigma")
+  "experiment", "lambda1", "lambda2", "sigma", paste0("x2_", unique(data_full$mouse)))
 
 # Data frame for classification at confidence 0.95 quantile
-classification_pp_thresh_df <- data.frame(matrix(NA, nrow = length(ecdf_results), ncol = 5))
+classification_pp_thresh_df <- data.frame(matrix(
+  NA, nrow = length(ecdf_results), ncol = (4 + length(unique(data_full$mouse)))))
 colnames(classification_pp_thresh_df) <- c(
-  "experiment", "lambda1", "lambda2", "x2", "sigma")
+  "experiment", "lambda1", "lambda2", "sigma", paste0("x2_", unique(data_full$mouse)))
 
 # Loop through the ECDFs of all knockout experiments
 for (i in 1:length(ecdf_results)) {
@@ -538,32 +523,36 @@ for (i in 1:length(ecdf_results)) {
   classification_pp_thresh_df[i, "experiment"] <- names(ecdf_results)[i]
   
   # lambda1: count number of points below consensus region and conduct pp-plot classifications
-  lambda1_diff_emp_theo <- ecdf_results[[i]][, "ecdf"] - ecdf_results[[i]][, "lambda1_theo"]
+  lambda1_diff_emp_theo <- ecdf_results[[i]][, "ecdf"] - ecdf_results[[i]][, "lambda1"]
   no_points_below_consensus_df[i, "lambda1"] <- sum(lambda1_diff_emp_theo <= -tol)
   classification_pp_df[i, "lambda1"] <- classification_pp_plot(lambda1_diff_emp_theo, tol, outlier)
   classification_pp_thresh_df[i, "lambda1"] <- 
-    classification_pp_plot_thresh(p, lambda1_diff_emp_theo, ecdf_results[[i]][, "lambda1_theo"], tol_p)
+    classification_pp_plot_thresh(p, lambda1_diff_emp_theo, ecdf_results[[i]][, "lambda1"], tol_p)
   
   # lambda2: count number of points below consensus region and conduct pp-plot classifications
-  lambda2_diff_emp_theo <- ecdf_results[[i]][, "ecdf"] - ecdf_results[[i]][, "lambda2_theo"]
+  lambda2_diff_emp_theo <- ecdf_results[[i]][, "ecdf"] - ecdf_results[[i]][, "lambda2"]
   no_points_below_consensus_df[i, "lambda2"] <- sum(lambda2_diff_emp_theo <= -tol)
   classification_pp_df[i, "lambda2"] <- classification_pp_plot(lambda2_diff_emp_theo, tol, outlier)
   classification_pp_thresh_df[i, "lambda2"] <- 
-    classification_pp_plot_thresh(p, lambda2_diff_emp_theo, ecdf_results[[i]][, "lambda2_theo"], tol_p)
-  
-  # x2: count number of points below consensus region and conduct pp-plot classifications
-  x2_diff_emp_theo <- ecdf_results[[i]][, "ecdf"] - ecdf_results[[i]][, "x2_theo"]
-  no_points_below_consensus_df[i, "x2"] <- sum(x2_diff_emp_theo <= -tol)
-  classification_pp_df[i, "x2"] <- classification_pp_plot(x2_diff_emp_theo, tol, outlier)
-  classification_pp_thresh_df[i, "x2"] <- 
-    classification_pp_plot_thresh(p, x2_diff_emp_theo, ecdf_results[[i]][, "x2_theo"], tol_p)
+    classification_pp_plot_thresh(p, lambda2_diff_emp_theo, ecdf_results[[i]][, "lambda2"], tol_p)
   
   # sigma: count number of points below consensus region and conduct pp-plot classifications
-  sigma_diff_emp_theo <- ecdf_results[[i]][, "ecdf"] - ecdf_results[[i]][, "sigma_theo"]
+  sigma_diff_emp_theo <- ecdf_results[[i]][, "ecdf"] - ecdf_results[[i]][, "sigma"]
   no_points_below_consensus_df[i, "sigma"] <- sum(sigma_diff_emp_theo <= -tol)
   classification_pp_df[i, "sigma"] <- classification_pp_plot(sigma_diff_emp_theo, tol, outlier)
   classification_pp_thresh_df[i, "sigma"] <- 
-    classification_pp_plot_thresh(p, sigma_diff_emp_theo, ecdf_results[[i]][, "sigma_theo"], tol_p)
+    classification_pp_plot_thresh(p, sigma_diff_emp_theo, ecdf_results[[i]][, "sigma"], tol_p)
+  
+  # x2 versions: count number of points below consensus region and conduct pp-plot classifications
+  ecdf_x2 <- ecdf_results[[i]][, startsWith(names(ecdf_results[[i]]), "x2_")]
+  for (j in 1:ncol(ecdf_x2)){
+    x2_name <- colnames(ecdf_x2)[j]
+    x2_diff_emp_theo <- ecdf_results[[i]][, "ecdf"] - ecdf_x2[, x2_name]
+    no_points_below_consensus_df[i, x2_name] <- sum(x2_diff_emp_theo <= -tol)
+    classification_pp_df[i, x2_name] <- classification_pp_plot(x2_diff_emp_theo, tol, outlier)
+    classification_pp_thresh_df[i, x2_name] <-
+      classification_pp_plot_thresh(p, x2_diff_emp_theo, ecdf_x2[, x2_name], tol_p)
+  }
 }
 
 
@@ -572,48 +561,84 @@ for (i in 1:length(ecdf_results)) {
 ################################################################################
 
 ##### Load estimation results #####
-# filename <- "results_log_model_fixed=(K,x1)_L2=(3,3,5,5,5,3)_seed=200.rds"
+# filename <- "results_log_model.rds"
 # result_list <- readRDS(paste0(folder.path, "/RDS/", filename))
 
 
 ##### Function which is parallelised by foreach #####
-KO_bootstrap_log_model <- function(
-    data, groups, sample_sizes, pouter, fixed_par){
+KO_bootstrap_log_model <- function(data, bestfit, experiment_info){
   
-  # Bootstrap sampling of original design
+  # Set design for bootstrap samples
+  groups <- as.character(data[, "time"])
+  sample_sizes <- sapply(unique(groups), function(x) 
+    return(sum(data[, "time"] == as.numeric(x))))
+  
+  # Sample indices for bootstrap sample
   data_b_index <- unlist(lapply(unique(groups), function(gr) {
     group_indices <- which(groups == gr)
     n_samples <- sample_sizes[gr]
     sample(group_indices, n_samples, replace = TRUE)
   }))
-  
-  # Prepare bootstrap sample for dMod
   data_b <- data[data_b_index,]
+  
+  # Label measurements of bootstrap sample with fictitious mice; 
+  # numbering does not necessarily coincide with numbering of original data set
+  num_mice <- sum(data_b$time == 0)
+  mouse_numbers <- rep(1:num_mice, 2)
+  mouse_numbers <- paste0("m", mouse_numbers)
+  data_b <- cbind(mouse_numbers, data_b)
+  colnames(data_b)[1] <- "mouse"
   rownames(data_b) <- NULL
-  data_b <- datalist(C1 = data_b[order(data_b$time),])
   
-  # Objective function for parameter estimation
-  obj <- normL2(data_b, g_dMod*x_dMod*p_dMod, errmodel = error_dMod) + constraintL2(
-    pouter, sigma = c(3, 3, 5, 5, 5, 3))
+  # Prepare mouse-specific data sets and parameter transformations for dMod 
+  unique_mice <- unique(data_b$mouse)
+  data_dMod <- NULL
+  p_dMod <- NULL
   
-  # Multiple parameter estimation with randomly chosen starting values
-  fits <- mstrust(obj, pouter[!names(pouter) %in% fixed_par], fixed = pouter[fixed_par], 
-                  rinit = 0.1, rmax = 10, fits = 20, samplefun = "runif", iterlim = 500,
-                  studyname = "multiple_fits")
-  
-  # If no estimation has converged yet, run multiple estimations until at least
-  # one estimation converges
-  while (inherits(try(as.parframe(fits)), "try-error")) {
-    fits <- mstrust(obj, pouter[!names(pouter) %in% fixed_par], fixed = pouter[fixed_par], 
-                    rinit = 0.1, rmax = 10, fits = 10, samplefun = "runif", iterlim = 1000,
-                    studyname = "multiple_fits")
+  for (j in 1:length(unique_mice)){
+    data_m <- data_b[data_b$mouse == unique_mice[j], ]
+    data_m <- data_m[, c("name", "time", "value", "sigma")]
+    data_m <- data_m[order(data_m$time), ]
+    data_m <- datalist(data_m)
+    names(data_m) <- unique_mice[j]
+    data_dMod <- data_dMod + data_m
+    
+    trafo <- getEquations(p_global, conditions = "global")
+    trafo["x1"] <- paste0("exp(x1_", unique_mice[j], ")")
+    trafo["x2"] <- paste0("exp(x2_", unique_mice[j], ")")
+    p_dMod <- p_dMod + P(trafo, condition = unique_mice[j])
   }
   
-  # Extract estimated parameters of best estimation run
-  bestfit_b <- as.parvec(as.parframe(fits))
+  # Center of starting values for parameter estimation
+  outerpars <- getParameters(p_dMod)
+  outerpars_x1 <- outerpars[grepl("x1_", outerpars)]
+  outerpars_x2 <- outerpars[grepl("x2_", outerpars)]
+  fixed_par <- c("K", outerpars_x1)
+  pouter <- structure(
+    c(as.numeric(bestfit[c("lambda1", "lambda2", "sigma")]), 
+      log(experiment_info$K), 
+      rep(log(experiment_info$x1), length(outerpars_x1)), 
+      rep(log(experiment_info$x1), length(outerpars_x2))), 
+    names = c("lambda1", "lambda2", "sigma", "K", outerpars_x1, outerpars_x2))
   
-  # Compute difference of lambda2 and lambda1
-  diff_lambda <- as.numeric(bestfit_b["lambda2"] - bestfit_b["lambda1"])
+  # Objective function for parameter estimation with L2-constraint
+  obj <- normL2(data_dMod, g_dMod*x_dMod*p_dMod, errmodel = error_dMod) + constraintL2(
+    pouter, sigma = 3)
+  
+  # Multiple parameter estimation with randomly chosen starting values
+  fits <- mstrust(
+    obj, pouter[!names(pouter) %in% fixed_par], fixed = pouter[fixed_par], 
+    studyname = "multiple_fits", rinit = 0.1, rmax = 10, fits = 30, 
+    samplefun = "runif", iterlim = 500)
+  
+  # If at least one estimation converged, calculate difference of lambda_2 and 
+  # lambda_1 for estimation with highest likelihood 
+  if (!inherits(try(as.parframe(fits)), "try-error")){
+    bestfit_b <- as.parvec(as.parframe(fits))
+    diff_lambda <- exp(as.numeric(bestfit_b["lambda2"])) - as.numeric(bestfit_b["lambda1"])
+  } else {
+    diff_lambda <- NA
+  }
   
   return(diff_lambda)
 }
@@ -623,37 +648,26 @@ KO_bootstrap_log_model <- function(
 set.seed(201)
 
 # Number of bootstrap samples
-B <- 999
+B <- 499
 boot_results <- list()
 
 # Loop through all knockout experiments
 for (s in 1:length(result_list)){ 
   
-  # Load experiment information
+  # Extract information about knockout experiment
   sample_name <- result_list[[s]]$sample
-  gene_nr <- result_list[[s]]$gene
+  gene_name <- result_list[[s]]$gene
+  exp_name <- paste0(sample_name, "_", gene_name)
+  bestfit <- result_list[[exp_name]]$bestfit
+  experiment_info <- subset(info_table, Sample == sample_name & Gene == gene_name)
   
-  # Extract data set, log-transform observations and prepare it for dMod
-  data <- subset(data_full, sample == sample_name & gene == gene_nr & organ == "BM")
+  # Extract data set
+  data <- subset(data_full, sample == sample_name & gene == gene_name)
   data <- data[, c("time", "value")]
   data <- data[order(data$time),]
-  data$value <- log(data$value)
   data$name <- "y"
   data$sigma <- NA
   data <- data[, c(3, 1, 2, 4)]
-  
-  # Design framework for bootstrap samples based on original data set
-  groups <- as.character(data[, "time"])
-  sample_sizes <- sapply(unique(groups), function(x) 
-    return(sum(data[, "time"] == as.numeric(x))))
-  
-  # Specify fixed parameters
-  fixed_par <- c("K", "x1")
-  
-  # Center of starting values for parameter estimation
-  pouter <- structure(
-    c(as.numeric(result_list[[s]]$bestfit), as.numeric(log(result_list[[s]]$fixed_par))),
-    names = c(names(result_list[[s]]$bestfit), fixed_par))
   
   # Detect the number of available cores and activate cluster
   cl <- makeCluster(detectCores() - 1)
@@ -662,24 +676,24 @@ for (s in 1:length(result_list)){
   # Parallelise estimation for bootstrap samples of the knockout experiment
   boot_results_exp <- foreach(
     i = 1:B,
-    .packages = c("dMod")) %dopar% {
+    .packages=c("dMod", "dplyr")) %dopar% {
       KO_bootstrap_log_model(
         data = data,
-        groups = groups,
-        sample_sizes = sample_sizes,
-        pouter = pouter,
-        fixed_par = fixed_par)
+        bestfit = bestfit,
+        experiment_info = experiment_info)
     }
   
   # Stop cluster
   stopCluster(cl)
   
   # Save bootstrap results for this knockout experiment
-  boot_results <- c(boot_results, list(unlist(boot_results_exp)))
-  names(boot_results)[length(boot_results)] <- paste0(sample_name, "_", gene_nr)
+  boot_results_unlist <- unlist(boot_results_exp)
+  print(paste("Number of diverged bootstrap estimations:", sum(is.na(boot_results_unlist))))
+  boot_results_unlist <- boot_results_unlist[!is.na(boot_results_unlist)]
+  boot_results <- c(boot_results, list(boot_results_unlist))
+  names(boot_results)[length(boot_results)] <- exp_name
 }
 
 # Save bootstrap results
-# filename <- "results_log_model_fixed=(K,x1)_L2=(3,3,5,5,5,3)_boot_seed=201.rds"
+# filename <- "results_log_model_boot.rds"
 # saveRDS(boot_results, file = paste0(folder.path, "/RDS/", filename))
-
