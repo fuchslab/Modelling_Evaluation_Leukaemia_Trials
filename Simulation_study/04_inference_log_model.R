@@ -225,7 +225,6 @@ bootstrap_log_model <- function(data, pars_sim){
     names(data_m) <- unique_mice[j]
     data_dMod <- data_dMod + data_m
     
-    # add initial parameters for each mouse individually to the parameter transformations
     trafo <- getEquations(p_global, conditions = "global")
     trafo["x1"] <- paste0("exp(x1_", unique_mice[j], ")")
     trafo["x2"] <- paste0("exp(x2_", unique_mice[j], ")")
