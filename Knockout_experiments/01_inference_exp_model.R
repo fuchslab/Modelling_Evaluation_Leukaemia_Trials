@@ -63,8 +63,9 @@ p_global <- P(equations[["full"]], condition = "global")
 estimation_exp_model <- function(experiment_info){
   
   # Prepare mouse-specific data sets and parameter transformations for dMod
-  data <- subset(data_full, sample== experiment_info$Sample & 
-                   gene==experiment_info$Gene & organ=="BM")
+  data <- subset(
+    data_full, sample == experiment_info$Sample & gene == experiment_info$Gene 
+    & organ == "BM")
   data$name <- "y"
   unique_mice <- unique(data$mouse)
   data_dMod <- NULL
@@ -243,7 +244,7 @@ for (s in 1:length(result_list)) {
   exp_name <- paste0(sample_name, "_", gene_name)
   bestfit <- result_list[[s]]$bestfit
   
-  # Load data set and prepare mouse-specific and parameter transformations for dMod
+  # Extract data set and prepare mouse-specific parameter transformations for dMod
   data <- subset(data_full, sample == sample_name & gene == gene_name)
   unique_mice <- unique(data$mouse)
   p_dMod <- NULL
@@ -254,7 +255,7 @@ for (s in 1:length(result_list)) {
     p_dMod <- p_dMod + P(trafo, condition = unique_mice[j])
   }
   
-  # Prepare bootstrape samples via predicting observable values for time points
+  # Prepare bootstrap samples via predicting observable values for time points
   # of original data set and estimated parameters
   time_obs <- sort(data$time)
   prediction_list <- (g_dMod*x_dMod*p_dMod)(time_obs, bestfit)
@@ -367,7 +368,8 @@ ecdf_results <- list()
 # Loop through bootstrap results of the knockout experiments 
 for (s in 1:length(boot_results)){
   
-  # Extract parameter estimates from original data set
+  # Extract parameter estimates from original data set and create center of
+  # starting values for parameter estimation
   exp_name <- names(boot_results)[s]
   pouter <- result_list[[exp_name]]$bestfit
   
@@ -451,7 +453,7 @@ diff_pred <- predict(poly_fit, data.frame(q = pred_x))
 # Load bootstrap and ECDF results
 # filename <- "results_exp_model_chi_boot.rds"
 # boot_results <- readRDS(paste0(folder.path, "/RDS/", filename))
-# num_data_sets <- dim(boot_results[[1]]$data_array)[3]
+# num_data_sets <- length(boot_results[[1]])
 # filename <- "results_exp_model_ecdf.rds"
 # ecdf_results <- readRDS(paste0(folder.path, "/RDS/", filename))
 
@@ -506,7 +508,7 @@ for (i in 1:length(ecdf_results)) {
   classification_pp_thresh_df[i, "theta3"] <- 
     classification_pp_plot_thresh(p, theta3_diff_emp_theo, ecdf_results[[i]][, "sigma"], tol_p)
   
-  # theta2: count number of points below consensus region and conduct pp-plot classifications
+  # theta2 versions: count number of points below consensus region and conduct pp-plot classifications
   ecdf_theta2 <- ecdf_results[[i]][, startsWith(names(ecdf_results[[i]]), "theta2_")]
   for (j in 1:ncol(ecdf_theta2)){
     theta2_name <- colnames(ecdf_theta2)[j]
