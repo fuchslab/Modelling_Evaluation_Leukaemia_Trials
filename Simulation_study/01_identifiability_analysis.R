@@ -148,6 +148,11 @@ p_dMod <- P(
     lambda1 = "lambda1", lambda2 = "lambda2", K = "exp(K)", x1 = "exp(x1)", 
     x2 = "exp(x2)", sigma = "exp(sigma)"), condition = "standard")
 
+# Set delta=lambda2-lambda1
+equations <- getEquations(p_dMod)
+equations[["standard"]]["lambda2"] <- "delta+lambda1"
+p_delta <- P(equations[["standard"]], condition = "standard")
+
 
 ##### Simulate data for structural identifiability analysis #####
 set.seed(59)
@@ -174,11 +179,6 @@ data_dMod <- datalist(standard = data)
 ##### Identifiability of full model #####
 ### Parameter estimation
 set.seed(100)
-
-
- #sigma=10
-
-#####
 
 # Center of starting values for parameter estimation
 pouter <- structure(
@@ -208,11 +208,6 @@ plotProfile(profiles, mode == "data")
 ### Parameter estimation
 set.seed(100)
 
-
- #sigma=10
-
-#####
-
 # Specify fixed parameter x1
 fixed_par <- c("x1") 
 
@@ -241,3 +236,35 @@ profiles <- profile(obj = obj, pars = bestfit, fixed = pouter[fixed_par],
                     whichPar = names(bestfit), alpha = 0.05, cores = 5)
 plotProfile(profiles, mode == "data")
 
+
+##### Identifiability with delta parametrisation and fixed x1(0) #####
+### Parameter estimation
+set.seed(100)
+
+# Specify fixed parameter x1
+fixed_par <- c("x1") 
+
+# Center of starting values for parameter estimation
+pouter <- structure(
+  c(pars["lambda1"], pars["lambda2"] - pars["lambda1"], log(pars["K"]), 
+    log(pars["x1"]), log(pars["x2"]), log(sigma)), 
+  names = c("lambda1", "delta", "K", "x1", "x2", "sigma"))
+
+# Objective function
+obj <- normL2(data_dMod, g_dMod*x_dMod*p_delta, errmodel = error_dMod) + constraintL2(
+  pouter, sigma = 10)
+
+# Multiple parameter estimations with randomly chosen starting values
+fits <- mstrust(
+  obj, pouter[!names(pouter) %in% fixed_par], fixed = pouter[fixed_par],  
+  studyname = "multiple_fits", rinit = 0.1, rmax = 10, cores = 5, fits = 50, 
+  samplefun = "rnorm", iterlim = 500)
+summary(fits)
+
+# Extract estimated parameters of best estimation run 
+bestfit <- as.parvec(as.parframe(fits))
+
+### Profile likelihoods
+profiles <- profile(obj = obj, pars = bestfit, fixed = pouter[fixed_par],
+                    whichPar = names(bestfit), alpha = 0.05, cores = 5)
+plotProfile(profiles, mode == "data")
