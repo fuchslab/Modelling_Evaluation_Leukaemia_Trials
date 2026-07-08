@@ -52,6 +52,11 @@ p_global <- P(
     lambda1 = "lambda1", lambda2 = "exp(lambda2)", K = "exp(K)", x1 = "exp(x1)", 
     x2 = "exp(x2)", sigma = "exp(sigma)"), condition = "global")
 
+# Set delta=lambda2-lambda1
+equations <- getEquations(p_global)
+equations[["global"]]["lambda2"] <- "delta+lambda1"
+p_delta <- P(equations[["global"]], condition = "lambda_diff")
+
 
 ################################################################################
 ######################## Parameter estimation ##################################
@@ -77,7 +82,7 @@ estimation_log_model <- function(experiment_info){
     names(data_m) <- unique_mice[j]
     data_dMod <- data_dMod + data_m
     
-    trafo <- getEquations(p_global, conditions = "global")
+    trafo <- getEquations(p_delta, conditions = "lambda_diff")
     trafo["x1"] <- paste0("exp(x1_", unique_mice[j], ")")
     trafo["x2"] <- paste0("exp(x2_", unique_mice[j], ")")
     p_dMod <- p_dMod + P(trafo, condition = unique_mice[j])
@@ -89,11 +94,11 @@ estimation_log_model <- function(experiment_info){
   outerpars_x2 <- outerpars[grepl("x2_", outerpars)]
   fixed_par <- c("K", outerpars_x1)
   pouter <- structure(
-    c(0.1, log(0.2), log(experiment_info$K), 
+    c(0.1, 0.1, log(experiment_info$K), 
       rep(log(experiment_info$x1), length(outerpars_x1)), 
       rep(log(experiment_info$x1), length(outerpars_x2)), 
       log(0.05)), 
-    names = c("lambda1", "lambda2", "K", outerpars_x1, outerpars_x2, "sigma"))
+    names = c("lambda1", "delta", "K", outerpars_x1, outerpars_x2, "sigma"))
   
   # Objective function for parameter estimation with L2-constraint
   obj <- normL2(data_dMod, g_dMod*x_dMod*p_dMod, errmodel = error_dMod) + constraintL2(
@@ -259,7 +264,7 @@ for (s in 1:length(result_list)) {
   p_dMod <- NULL
   
   for (j in 1:length(unique_mice)){
-    trafo <- getEquations(p_global, conditions = "global")
+    trafo <- getEquations(p_delta, conditions = "lambda_diff")
     trafo["x1"] <- paste0("exp(x1_", unique_mice[j], ")")
     trafo["x2"] <- paste0("exp(x2_", unique_mice[j], ")")
     p_dMod <- p_dMod + P(trafo, condition = unique_mice[j])
@@ -339,7 +344,7 @@ ecdf_log_model <- function(boot_result, pouter, p_dMod){
   
   # Parameter names for which empirical likelihood ratios should be calculated 
   # and output data frame
-  par_names <- c("lambda1", "lambda2", "sigma", paste0("x2_", getConditions(p_dMod)))
+  par_names <- c("lambda1", "delta", "sigma", paste0("x2_", getConditions(p_dMod)))
   mllik_simple_df <- data.frame(matrix(NA, nrow = 1, ncol = (length(par_names) + 1)))
   colnames(mllik_simple_df) <- c("mllik_theta_all", par_names)
   mllik_simple_df[1, "mllik_theta_all"] <- boot_result$mllik
@@ -396,7 +401,7 @@ for (s in 1:length(boot_results)){
   unique_mice <- names(boot_results[[s]][[1]]$data_dMod)
   p_dMod <- NULL
   for (j in 1:length(unique_mice)){
-    trafo <- getEquations(p_global, conditions = "global")
+    trafo <- getEquations(p_delta, conditions = "lambda_diff")
     trafo["x1"] <- paste0("exp(x1_", unique_mice[j], ")")
     trafo["x2"] <- paste0("exp(x2_", unique_mice[j], ")")
     p_dMod <- p_dMod + P(trafo, condition = unique_mice[j])
@@ -500,19 +505,19 @@ tol_p <- tol[p_idx]
 no_points_below_consensus_df <- data.frame(matrix(
   NA, nrow = length(ecdf_results), ncol = (4 + length(unique(data_full$mouse)))))
 colnames(no_points_below_consensus_df) <- c(
-  "experiment", "lambda1", "lambda2", "sigma", paste0("x2_", unique(data_full$mouse)))
+  "experiment", "lambda1", "delta", "sigma", paste0("x2_", unique(data_full$mouse)))
 
 # Data frame for pp-plot classification
 classification_pp_df <- data.frame(matrix(
   NA, nrow = length(ecdf_results), ncol = (4 + length(unique(data_full$mouse)))))
 colnames(classification_pp_df) <- c(
-  "experiment", "lambda1", "lambda2", "sigma", paste0("x2_", unique(data_full$mouse)))
+  "experiment", "lambda1", "delta", "sigma", paste0("x2_", unique(data_full$mouse)))
 
 # Data frame for classification at confidence 0.95 quantile
 classification_pp_thresh_df <- data.frame(matrix(
   NA, nrow = length(ecdf_results), ncol = (4 + length(unique(data_full$mouse)))))
 colnames(classification_pp_thresh_df) <- c(
-  "experiment", "lambda1", "lambda2", "sigma", paste0("x2_", unique(data_full$mouse)))
+  "experiment", "lambda1", "delta", "sigma", paste0("x2_", unique(data_full$mouse)))
 
 # Loop through the ECDFs of all knockout experiments
 for (i in 1:length(ecdf_results)) {
@@ -529,12 +534,12 @@ for (i in 1:length(ecdf_results)) {
   classification_pp_thresh_df[i, "lambda1"] <- 
     classification_pp_plot_thresh(p, lambda1_diff_emp_theo, ecdf_results[[i]][, "lambda1"], tol_p)
   
-  # lambda2: count number of points below consensus region and conduct pp-plot classifications
-  lambda2_diff_emp_theo <- ecdf_results[[i]][, "ecdf"] - ecdf_results[[i]][, "lambda2"]
-  no_points_below_consensus_df[i, "lambda2"] <- sum(lambda2_diff_emp_theo <= -tol)
-  classification_pp_df[i, "lambda2"] <- classification_pp_plot(lambda2_diff_emp_theo, tol, outlier)
-  classification_pp_thresh_df[i, "lambda2"] <- 
-    classification_pp_plot_thresh(p, lambda2_diff_emp_theo, ecdf_results[[i]][, "lambda2"], tol_p)
+  # delta: count number of points below consensus region and conduct pp-plot classifications
+  delta_diff_emp_theo <- ecdf_results[[i]][, "ecdf"] - ecdf_results[[i]][, "delta"]
+  no_points_below_consensus_df[i, "delta"] <- sum(delta_diff_emp_theo <= -tol)
+  classification_pp_df[i, "delta"] <- classification_pp_plot(delta_diff_emp_theo, tol, outlier)
+  classification_pp_thresh_df[i, "delta"] <- 
+    classification_pp_plot_thresh(p, delta_diff_emp_theo, ecdf_results[[i]][, "delta"], tol_p)
   
   # sigma: count number of points below consensus region and conduct pp-plot classifications
   sigma_diff_emp_theo <- ecdf_results[[i]][, "ecdf"] - ecdf_results[[i]][, "sigma"]
@@ -554,146 +559,3 @@ for (i in 1:length(ecdf_results)) {
       classification_pp_plot_thresh(p, x2_diff_emp_theo, ecdf_x2[, x2_name], tol_p)
   }
 }
-
-
-################################################################################
-################ Bootstrapping for lambda2 - lambda1 ###########################
-################################################################################
-
-##### Load estimation results #####
-# filename <- "results_log_model.rds"
-# result_list <- readRDS(paste0(folder.path, "/RDS/", filename))
-
-
-##### Function which is parallelised by foreach #####
-KO_bootstrap_log_model <- function(data, bestfit, experiment_info){
-  
-  # Set design for bootstrap samples
-  groups <- as.character(data[, "time"])
-  sample_sizes <- sapply(unique(groups), function(x) 
-    return(sum(data[, "time"] == as.numeric(x))))
-  
-  # Sample indices for bootstrap sample
-  data_b_index <- unlist(lapply(unique(groups), function(gr) {
-    group_indices <- which(groups == gr)
-    n_samples <- sample_sizes[gr]
-    sample(group_indices, n_samples, replace = TRUE)
-  }))
-  data_b <- data[data_b_index,]
-  
-  # Label measurements of bootstrap sample with fictitious mice; 
-  # numbering does not necessarily coincide with numbering of original data set
-  num_mice <- sum(data_b$time == 0)
-  mouse_numbers <- rep(1:num_mice, 2)
-  mouse_numbers <- paste0("m", mouse_numbers)
-  data_b <- cbind(mouse_numbers, data_b)
-  colnames(data_b)[1] <- "mouse"
-  rownames(data_b) <- NULL
-  
-  # Prepare mouse-specific data sets and parameter transformations for dMod 
-  unique_mice <- unique(data_b$mouse)
-  data_dMod <- NULL
-  p_dMod <- NULL
-  
-  for (j in 1:length(unique_mice)){
-    data_m <- data_b[data_b$mouse == unique_mice[j], ]
-    data_m <- data_m[, c("name", "time", "value", "sigma")]
-    data_m <- data_m[order(data_m$time), ]
-    data_m <- datalist(data_m)
-    names(data_m) <- unique_mice[j]
-    data_dMod <- data_dMod + data_m
-    
-    trafo <- getEquations(p_global, conditions = "global")
-    trafo["x1"] <- paste0("exp(x1_", unique_mice[j], ")")
-    trafo["x2"] <- paste0("exp(x2_", unique_mice[j], ")")
-    p_dMod <- p_dMod + P(trafo, condition = unique_mice[j])
-  }
-  
-  # Center of starting values for parameter estimation
-  outerpars <- getParameters(p_dMod)
-  outerpars_x1 <- outerpars[grepl("x1_", outerpars)]
-  outerpars_x2 <- outerpars[grepl("x2_", outerpars)]
-  fixed_par <- c("K", outerpars_x1)
-  pouter <- structure(
-    c(as.numeric(bestfit[c("lambda1", "lambda2", "sigma")]), 
-      log(experiment_info$K), 
-      rep(log(experiment_info$x1), length(outerpars_x1)), 
-      rep(log(experiment_info$x1), length(outerpars_x2))), 
-    names = c("lambda1", "lambda2", "sigma", "K", outerpars_x1, outerpars_x2))
-  
-  # Objective function for parameter estimation with L2-constraint
-  obj <- normL2(data_dMod, g_dMod*x_dMod*p_dMod, errmodel = error_dMod) + constraintL2(
-    pouter, sigma = 3)
-  
-  # Multiple parameter estimation with randomly chosen starting values
-  fits <- mstrust(
-    obj, pouter[!names(pouter) %in% fixed_par], fixed = pouter[fixed_par], 
-    studyname = "multiple_fits", rinit = 0.1, rmax = 10, fits = 30, 
-    samplefun = "runif", iterlim = 500)
-  
-  # If at least one estimation converged, calculate difference of lambda_2 and 
-  # lambda_1 for estimation with highest likelihood 
-  if (!inherits(try(as.parframe(fits)), "try-error")){
-    bestfit_b <- as.parvec(as.parframe(fits))
-    diff_lambda <- exp(as.numeric(bestfit_b["lambda2"])) - as.numeric(bestfit_b["lambda1"])
-  } else {
-    diff_lambda <- NA
-  }
-  
-  return(diff_lambda)
-}
-
-
-##### Parallelise bootstrapping for each knockout experiment #####
-set.seed(201)
-
-# Number of bootstrap samples
-B <- 499
-boot_results <- list()
-
-# Loop through all knockout experiments
-for (s in 1:length(result_list)){ 
-  
-  # Extract information about knockout experiment
-  sample_name <- result_list[[s]]$sample
-  gene_name <- result_list[[s]]$gene
-  exp_name <- paste0(sample_name, "_", gene_name)
-  bestfit <- result_list[[exp_name]]$bestfit
-  experiment_info <- subset(info_table, Sample == sample_name & Gene == gene_name)
-  
-  # Extract data set
-  data <- subset(data_full, sample == sample_name & gene == gene_name)
-  data <- data[, c("time", "value")]
-  data <- data[order(data$time),]
-  data$name <- "y"
-  data$sigma <- NA
-  data <- data[, c(3, 1, 2, 4)]
-  
-  # Detect the number of available cores and activate cluster
-  cl <- makeCluster(detectCores() - 1)
-  registerDoParallel(cl) 
-  
-  # Parallelise estimation for bootstrap samples of the knockout experiment
-  boot_results_exp <- foreach(
-    i = 1:B,
-    .packages=c("dMod", "dplyr")) %dopar% {
-      KO_bootstrap_log_model(
-        data = data,
-        bestfit = bestfit,
-        experiment_info = experiment_info)
-    }
-  
-  # Stop cluster
-  stopCluster(cl)
-  
-  # Save bootstrap results for this knockout experiment
-  boot_results_unlist <- unlist(boot_results_exp)
-  print(paste("Number of diverged bootstrap estimations:", sum(is.na(boot_results_unlist))))
-  boot_results_unlist <- boot_results_unlist[!is.na(boot_results_unlist)]
-  boot_results <- c(boot_results, list(boot_results_unlist))
-  names(boot_results)[length(boot_results)] <- exp_name
-}
-
-# Save bootstrap results
-# filename <- "results_log_model_boot.rds"
-# saveRDS(boot_results, file = paste0(folder.path, "/RDS/", filename))
